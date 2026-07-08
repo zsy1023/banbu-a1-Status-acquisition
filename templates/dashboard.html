@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>拓竹打印机状态监控</title>
+
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: #0f172a; color: #e2e8f0;
+    min-height: 100vh; padding: 20px;
+  }
+  .container { max-width: 900px; margin: 0 auto; }
+  h1 {
+    font-size: 1.6rem; margin-bottom: 20px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  h1 small { font-size: 0.8rem; color: #94a3b8; font-weight: normal; }
+
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+  .card {
+    background: #1e293b; border-radius: 12px; padding: 16px;
+    border: 1px solid #334155;
+  }
+  .card.full { grid-column: 1 / -1; }
+  .card-title {
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;
+    color: #64748b; margin-bottom: 8px;
+  }
+
+  .status-badge {
+    display: inline-block; padding: 4px 14px; border-radius: 20px;
+    font-weight: 600; font-size: 0.9rem;
+  }
+  .status-idle { background: #334155; color: #94a3b8; }
+  .status-printing { background: #166534; color: #bbf7d0; }
+  .status-paused { background: #854d0e; color: #fef08a; }
+  .status-finished { background: #1e40af; color: #bfdbfe; }
+  .status-failed { background: #991b1b; color: #fecaca; }
+
+  .progress-bar {
+    width: 100%; height: 16px; background: #0f172a; border-radius: 8px;
+    overflow: hidden; margin: 10px 0 6px;
+  }
+  .progress-fill {
+    height: 100%; border-radius: 8px; transition: width 0.8s ease;
+    background: linear-gradient(90deg, #22c55e, #16a34a);
+  }
+  .stat-row {
+    display: flex; justify-content: space-between; padding: 4px 0;
+    border-bottom: 1px solid #1e293b; font-size: 0.9rem;
+  }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-label { color: #94a3b8; }
+  .stat-value { font-weight: 500; }
+
+  .temp-grid {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;
+  }
+  .temp-item {
+    text-align: center; padding: 10px; background: #0f172a;
+    border-radius: 8px;
+  }
+  .temp-value { font-size: 1.5rem; font-weight: 700; }
+  .temp-label { font-size: 0.75rem; color: #64748b; margin-top: 2px; }
+  .temp-nozzle .temp-value { color: #f87171; }
+  .temp-bed .temp-value { color: #fb923c; }
+  .temp-chamber .temp-value { color: #38bdf8; }
+
+  .ams-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 10px;
+  }
+  .ams-tray {
+    background: #0f172a; border-radius: 8px; padding: 10px;
+    text-align: center;
+  }
+  .ams-color-block {
+    width: 32px; height: 32px; border-radius: 50%; margin: 0 auto 6px;
+    border: 2px solid #334155;
+  }
+  .ams-tray-name { font-size: 0.8rem; color: #94a3b8; }
+
+  .fan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+
+  .cover-img {
+    max-width: 100%; max-height: 200px; border-radius: 8px;
+    margin-top: 8px; object-fit: contain;
+  }
+
+  .login-overlay {
+    position: fixed; inset: 0; background: rgba(15,23,42,0.95);
+    display: none; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .login-box {
+    background: #1e293b; padding: 32px; border-radius: 16px;
+    width: 360px; border: 1px solid #334155;
+  }
+  .login-box h2 { margin-bottom: 16px; }
+  .login-box input {
+    width: 100%; padding: 10px; margin-bottom: 10px;
+    background: #0f172a; border: 1px solid #334155; border-radius: 8px;
+    color: #e2e8f0; font-size: 1rem;
+  }
+  .login-box button {
+    width: 100%; padding: 10px; border: none; border-radius: 8px;
+    background: #2563eb; color: white; font-size: 1rem; cursor: pointer;
+    margin-bottom: 8px;
+  }
+  .login-box button:hover { background: #1d4ed8; }
+  .login-box .btn-sms { background: #334155; }
+  .login-box .btn-sms:hover { background: #475569; }
+  .login-box .error { color: #f87171; font-size: 0.85rem; margin-top: 8px; }
+
+  @media (max-width: 600px) {
+    .cards { grid-template-columns: 1fr; }
+    .temp-grid { grid-template-columns: 1fr; }
+  }
+
+  .loading {
+    text-align: center; padding: 60px; color: #64748b;
+  }
+  .last-refresh {
+    text-align: right; font-size: 0.75rem; color: #64748b; margin-top: 20px;
+  }
+  .toast {
+    position: fixed; bottom: 20px; right: 20px;
+    background: #1e293b; border: 1px solid #334155;
+    padding: 12px 20px; border-radius: 8px; font-size: 0.85rem;
+    display: none; z-index: 200;
+  }
+
+  .control-btn {
+    background: #334155; color: #e2e8f0; border: 1px solid #475569;
+    padding: 4px 12px; border-radius: 6px; cursor: pointer;
+    font-size: 0.85rem; transition: background 0.2s;
+  }
+  .control-btn:hover { background: #475569; }
+  .control-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .confirm-overlay {
+    position: fixed; inset: 0; background: rgba(15,23,42,0.92);
+    display: none; align-items: center; justify-content: center;
+    z-index: 150;
+  }
+  .confirm-box {
+    background: #1e293b; padding: 24px; border-radius: 16px;
+    width: 380px; border: 1px solid #334155;
+  }
+  .confirm-box h3 { margin-bottom: 8px; }
+  .confirm-box p { color: #94a3b8; font-size: 0.9rem; margin-bottom: 16px; }
+  .confirm-box .btn-row { display: flex; gap: 10px; }
+  .confirm-box .btn-confirm {
+    flex: 1; padding: 10px; border: none; border-radius: 8px;
+    background: #2563eb; color: white; font-size: 1rem; cursor: pointer;
+  }
+  .confirm-box .btn-confirm:hover { background: #1d4ed8; }
+  .confirm-box .btn-cancel {
+    flex: 1; padding: 10px; border: 1px solid #475569; border-radius: 8px;
+    background: transparent; color: #94a3b8; font-size: 1rem; cursor: pointer;
+  }
+  .confirm-box .btn-cancel:hover { background: #1e293b; color: #e2e8f0; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>🖨️ 拓竹打印机状态 <small id="serial"></small> <span style="float:right;font-size:0.8rem"><a href="#" onclick="showSettings();return false" style="color:#64748b;text-decoration:none">⚙️ 通知设置</a></span></h1>
+  <div id="app" class="loading">⏳ 加载中...</div>
+  <div class="last-refresh" id="lastRefresh"></div>
+</div>
+
+<div id="loginOverlay" class="login-overlay">
+  <div class="login-box">
+    <h2>🔐 登录拓竹云</h2>
+    <p style="color:#94a3b8;margin-bottom:12px;font-size:0.85rem">
+      需要验证码登录才能获取打印机状态
+    </p>
+    <input type="text" id="loginPhone" placeholder="手机号">
+    <button class="btn-sms" onclick="sendCode()">📨 发送验证码</button>
+    <input type="text" id="loginCode" placeholder="验证码">
+    <button onclick="doLogin()">登录</button>
+    <div id="loginError" class="error"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<div id="confirmOverlay" class="confirm-overlay">
+  <div class="confirm-box">
+    <h3 id="confirmTitle">⚠️ 确认操作</h3>
+    <p id="confirmMessage">确认执行此操作？</p>
+    <div id="confirmPreview" style="color:#64748b;font-size:0.85rem;margin-bottom:12px"></div>
+    <div class="btn-row">
+      <button class="btn-cancel" onclick="cancelConfirm()">取消</button>
+      <button class="btn-confirm" id="btnConfirm" onclick="doConfirm()">确认</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let PHONE = "";
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json', ...opts.headers },
+    ...opts
+  });
+  return res.json();
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+
+function render(data) {
+  const s = data;
+  if (!s.connected) {
+    document.getElementById('app').innerHTML =
+      '<div style="text-align:center;padding:40px;color:#f87171">❌ 无法获取打印机状态</div>';
+    return;
+  }
+
+  const stateCls = 'status-' + s.state;
+  const stateLabels = { idle:'待机', printing:'打印中', paused:'暂停', finished:'已完成', failed:'失败' };
+  const stateLabel = stateLabels[s.state] || s.state_raw;
+  const pct = Math.round(s.progress.percent);
+  const taskName = s.task.name || '无任务';
+  const remain = s.time.remaining_min || 0;
+  const remainStr = remain > 60
+    ? Math.floor(remain/60) + 'h' + (remain%60) + 'min'
+    : remain + 'min';
+
+  const amsHtml = (s.ams || []).map(unit =>
+    '<div style="margin-bottom:8px">' +
+      '<div style="font-size:0.8rem;color:#64748b;margin-bottom:4px">' +
+        'AMS ' + unit.id + ' 湿度: ' + unit.humidity + '%</div>' +
+      '<div class="ams-grid">' +
+        (unit.trays || []).map(t =>
+          '<div class="ams-tray">' +
+            '<div class="ams-color-block" style="background:' + t.color + '"></div>' +
+            '<div>' + t.type + '</div>' +
+            '<div class="ams-tray-name">' + (t.color_name || t.color) + '</div>' +
+          '</div>'
+        ).join('') +
+      '</div></div>'
+  ).join('');
+
+  document.getElementById('app').innerHTML =
+    '<div class="cards">' +
+      '<div class="card">' +
+        '<div class="card-title">状态</div>' +
+        '<div><span class="status-badge ' + stateCls + '">' + stateLabel + '</span></div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<div class="card-title">进度</div>' +
+        '<div style="font-size:1.8rem;font-weight:700">' + pct + '%</div>' +
+        '<div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%"></div></div>' +
+        '<div style="font-size:0.85rem;color:#94a3b8">层 ' + s.progress.layer + ' / ' + s.progress.total_layers + '</div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="cards">' +
+      '<div class="card">' +
+        '<div class="card-title">🌡️ 温度</div>' +
+        '<div class="temp-grid">' +
+          '<div class="temp-item temp-nozzle"><div class="temp-value">' + s.temperature.nozzle.current + '°</div><div class="temp-label">喷头 → ' + s.temperature.nozzle.target + '°</div></div>' +
+          '<div class="temp-item temp-bed"><div class="temp-value">' + s.temperature.bed.current + '°</div><div class="temp-label">热床 → ' + s.temperature.bed.target + '°</div></div>' +
+          '<div class="temp-item temp-chamber"><div class="temp-value">' + s.temperature.chamber + '°</div><div class="temp-label">腔体</div></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<div class="card-title">⏱️ 时间</div>' +
+        '<div class="stat-row"><span class="stat-label">剩余</span><span class="stat-value">' + remainStr + '</span></div>' +
+        '<div class="stat-row"><span class="stat-label">总时间</span><span class="stat-value">' + s.time.total_min + 'min</span></div>' +
+        (s.task.weight_g ? '<div class="stat-row"><span class="stat-label">重量</span><span class="stat-value">' + s.task.weight_g + 'g</span></div>' : '') +
+        '<div class="stat-row" style="border:none"><span class="stat-label">WiFi</span><span class="stat-value">' + s.hardware.wifi + '</span></div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="cards">' +
+      '<div class="card full">' +
+        '<div class="card-title">📄 任务</div>' +
+        '<div style="font-size:1.1rem;font-weight:500">' + taskName + '</div>' +
+        (s.task.cover_url ? '<img class="cover-img" src="' + s.task.cover_url + '" alt="预览" onerror="this.style.display=\'none\'">' : '') +
+      '</div>' +
+    '</div>' +
+    '<div class="cards">' +
+      '<div class="card">' +
+        '<div class="card-title">💨 风扇</div>' +
+        '<div class="fan-grid">' +
+          '<div class="stat-row"><span class="stat-label">冷却</span><span class="stat-value">' + s.fan.cooling + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">热端</span><span class="stat-value">' + s.fan.heatbreak + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">大风扇1</span><span class="stat-value">' + s.fan.big_fan1 + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">大风扇2</span><span class="stat-value">' + s.fan.big_fan2 + '</span></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="card">' +
+        '<div class="card-title">⚙️ 硬件</div>' +
+        '<div class="stat-row"><span class="stat-label">喷嘴</span><span class="stat-value">' + s.hardware.nozzle_diameter + 'mm ' + s.hardware.nozzle_type + '</span></div>' +
+        '<div class="stat-row"><span class="stat-label">灯光</span><span class="stat-value">' + s.hardware.light_mode + '</span>' +
+          '<button class="control-btn" onclick="toggleLight()">🔘 开关</button></div>' +
+        '<div class="stat-row"><span class="stat-label">速度</span><span class="stat-value">' + s.speed + '%</span>' +
+          '<button class="control-btn" onclick="manualRefresh()">🔄 刷新</button></div>' +
+      '</div>' +
+    '</div>' +
+    (s.ams && s.ams.length ?
+      '<div class="cards"><div class="card full"><div class="card-title">🎨 AMS</div>' + amsHtml + '</div></div>'
+    : '') +
+
+    '<div class="cards">' +
+      '<div class="card full">' +
+        '<div class="card-title">📋 打印历史</div>' +
+        '<div id="printHistory"><div style="color:#64748b;font-size:0.85rem">加载中...</div></div>' +
+      '</div>' +
+    '</div>';
+}
+
+async function refresh() {
+  try {
+    const data = await api('/api/status');
+    if (data.ok === false && data.error === '需要先登录') {
+      document.getElementById('loginOverlay').style.display = 'flex';
+      document.getElementById('app').innerHTML = '';
+      const cfg = await api('/api/config');
+      if (cfg.phone) {
+        document.getElementById('loginPhone').value = cfg.phone;
+        PHONE = cfg.phone;
+      }
+      return;
+    }
+    render(data);
+    if (data.last_refresh) {
+      document.getElementById('lastRefresh').textContent = '上次刷新: ' + data.last_refresh;
+    }
+  } catch(e) {
+    console.error(e);
+  }
+}
+
+let _pendingConfirmId = null;
+
+async function toggleLight() {
+  const r = await api('/api/control', {
+    method: 'POST',
+    body: JSON.stringify({action: 'light_toggle'})
+  });
+  if (r.ok && r.confirm_id) {
+    _pendingConfirmId = r.confirm_id;
+    document.getElementById('confirmTitle').textContent = '💡 开关灯光';
+    document.getElementById('confirmMessage').textContent = r.message || '确认操作？';
+    const prev = r.preview;
+    document.getElementById('confirmPreview').textContent =
+      '当前: ' + (prev.current_light === 'on' ? '🟡 开' : '⚫ 关') +
+      '  →  将变为: ' + (prev.will_change_to === 'on' ? '🟡 开' : '⚫ 关');
+    document.getElementById('confirmOverlay').style.display = 'flex';
+  } else {
+    showToast('❌ ' + (r.error || '请求失败'));
+  }
+}
+
+async function doConfirm() {
+  if (!_pendingConfirmId) return;
+  document.getElementById('btnConfirm').disabled = true;
+  document.getElementById('btnConfirm').textContent = '⏳ 执行中...';
+  const r = await api('/api/control', {
+    method: 'POST',
+    body: JSON.stringify({action: 'light_toggle', confirm_id: _pendingConfirmId})
+  });
+  document.getElementById('confirmOverlay').style.display = 'none';
+  _pendingConfirmId = null;
+  document.getElementById('btnConfirm').disabled = false;
+  document.getElementById('btnConfirm').textContent = '确认';
+  if (r.ok && r.status === 'executed') {
+    showToast('✅ 灯光已' + (r.result.light_mode === 'on' ? '打开' : '关闭'));
+    refresh();
+  } else {
+    showToast('❌ ' + (r.error || '执行失败'));
+  }
+}
+
+function cancelConfirm() {
+  document.getElementById('confirmOverlay').style.display = 'none';
+  _pendingConfirmId = null;
+}
+
+async function manualRefresh() {
+  try {
+    const r = await api('/api/refresh', {method: 'POST'});
+    if (r.ok) {
+      showToast('✅ 状态已刷新');
+      refresh();
+    } else {
+      showToast('❌ ' + (r.error || '刷新失败'));
+    }
+  } catch(e) {
+    showToast('❌ 刷新失败');
+  }
+}
+
+async function sendCode() {
+  const phone = document.getElementById('loginPhone').value || PHONE;
+  const err = document.getElementById('loginError');
+  if (!phone) { err.textContent = '请输入手机号'; return; }
+  err.textContent = '📨 发送中...';
+  const r = await api('/api/send-code', {
+    method: 'POST', body: JSON.stringify({phone})
+  });
+  err.textContent = r.ok ? '✅ 验证码已发送' : '❌ 发送失败';
+}
+
+async function doLogin() {
+  const phone = document.getElementById('loginPhone').value || PHONE;
+  const code = document.getElementById('loginCode').value;
+  const err = document.getElementById('loginError');
+  if (!code) { err.textContent = '请输入验证码'; return; }
+  err.textContent = '⏳ 登录中...';
+  const r = await api('/api/login', {
+    method: 'POST', body: JSON.stringify({phone, code})
+  });
+  if (r.ok) {
+    document.getElementById('loginOverlay').style.display = 'none';
+    err.textContent = '';
+    document.getElementById('loginCode').value = '';
+    showToast('✅ 登录成功');
+    refresh();
+  } else {
+    err.textContent = '❌ ' + (r.error || '登录失败');
+  }
+}
+
+
+async function updateHistory() {
+  const r = await api('/api/print-history?limit=10');
+  if (!r.ok) return;
+  const list = r.data || [];
+  if (list.length === 0) {
+    document.getElementById('printHistory').innerHTML = '<div style="color:#64748b;font-size:0.85rem">暂无打印记录</div>';
+    return;
+  }
+  let html = '<div style="font-size:0.85rem">';
+  for (const item of list) {
+    const statusIcon = item.status === 'completed' ? '✅' : '❌';
+    const start = (item.start_time || '').slice(0, 19).replace('T', ' ');
+    const end = (item.end_time || '').slice(0, 19).replace('T', ' ');
+    const dur = item.total_time_min ? item.total_time_min + 'min' : '-';
+    html += '<div class="stat-row">' +
+      '<span class="stat-label">' + statusIcon + ' ' + (item.task_name || '未知') + '</span>' +
+      '<span class="stat-value">' + start + ' | ' + dur + '</span>' +
+      '</div>';
+  }
+  html += '</div>';
+  document.getElementById('printHistory').innerHTML = html;
+}
+
+refresh();
+updateHistory();
+setInterval(refresh, 15000);
+setInterval(updateHistory, 60000);
+</script>
+<div id="settingsOverlay" class="confirm-overlay" style="display:none;z-index:160">
+  <div class="confirm-box" style="width:500px;max-height:80vh;overflow-y:auto">
+    <h3>🔔 通知规则设置</h3>
+    <p style="color:#94a3b8;font-size:0.85rem;margin:4px 0 12px">
+      规则触发后自动弹 Windows 通知，同一规则仅触发一次，下次打印时重置。
+    </p>
+    <div id="notifyRulesList"></div>
+    <div style="margin-top:12px">
+      <select id="newRuleType" style="background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:6px;width:100%;margin-bottom:8px">
+        <option value="">+ 添加规则...</option>
+      </select>
+    </div>
+    <div class="btn-row" style="margin-top:12px">
+      <button class="btn-cancel" onclick="document.getElementById('settingsOverlay').style.display='none'">关闭</button>
+      <button class="btn-confirm" onclick="saveNotifyRules()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let _notifyRuleTypes = [];
+let _notifyRules = [];
+
+async function showSettings() {
+  const r = await api('/api/notify-rules');
+  if (!r.ok) { showToast('❌ 加载规则失败'); return; }
+  _notifyRuleTypes = r.types || [];
+  _notifyRules = r.data || [];
+  renderNotifySettings();
+  document.getElementById('settingsOverlay').style.display = 'flex';
+
+  const sel = document.getElementById('newRuleType');
+  sel.innerHTML = '<option value="">+ 添加规则...</option>';
+  _notifyRuleTypes.forEach(t => {
+    sel.innerHTML += '<option value="' + t.id + '">' + t.label + '</option>';
+  });
+}
+
+function renderNotifySettings() {
+  let html = '';
+  _notifyRules.forEach((r, i) => {
+    if (r.builtin) {
+      html += '<div class="stat-row"><span class="stat-label">' + r.label + '</span><span class="stat-value" style="color:#64748b;font-size:0.75rem">内置</span></div>';
+    } else {
+      html += '<div class="stat-row">' +
+        '<span class="stat-label">' + r.label + '</span>' +
+        '<span><button class="control-btn" onclick="removeNotifyRule(&#39;' + r.id + '&#39;)">🗑️</button></span</span></div>';
+    }
+  });
+  if (_notifyRules.filter(r => !r.builtin).length === 0) {
+    html += '<div style="color:#64748b;font-size:0.85rem;padding:8px 0">暂无自定义规则，从下方添加</div>';
+  }
+  document.getElementById('notifyRulesList').innerHTML = html;
+}
+
+function addNotifyRule() {
+  const sel = document.getElementById('newRuleType');
+  const typeId = sel.value;
+  if (!typeId) return;
+  const t = _notifyRuleTypes.find(x => x.id === typeId);
+  if (!t) return;
+
+  const val = prompt('输入提醒值 (' + t.unit + ')', t.placeholder || '');
+  if (val === null || val === '') return;
+
+  const id = 'rule_' + Date.now();
+  const rule = {
+    id: id,
+    type: typeId,
+    value: parseInt(val) || 0,
+    enabled: true,
+    label: t.label + ' (' + val + t.unit + ')',
+  };
+  if (val && val.includes('-')) {
+    const parts = val.split('-');
+    rule.value = parseInt(parts[0]) || 0;
+    rule.value2 = parseInt(parts[1]) || (parseInt(parts[0]) + 10);
+    rule.label = t.label + ' (' + rule.value + '-' + rule.value2 + t.unit + ')';
+  }
+  _notifyRules.push(rule);
+  renderNotifySettings();
+}
+
+async function saveNotifyRules() {
+  const r = await api('/api/notify-rules', {
+    method: 'POST',
+    body: JSON.stringify({rules: _notifyRules})
+  });
+  if (r.ok) {
+    showToast('✅ 规则已保存');
+    document.getElementById('settingsOverlay').style.display = 'none';
+  } else {
+    showToast('❌ ' + (r.error || '保存失败'));
+  }
+}
+
+function removeNotifyRule(id) {
+  _notifyRules = _notifyRules.filter(r => r.builtin || r.id !== id);
+  renderNotifySettings();
+}
+
+document.addEventListener('change', function(e) {
+  if (e.target && e.target.id === 'newRuleType' && e.target.value) {
+    addNotifyRule();
+    e.target.value = '';
+  }
+});
+</script>
+</body>
+</html>

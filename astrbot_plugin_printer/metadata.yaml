@@ -1,0 +1,7 @@
+name: astrbot_plugin_printer
+display_name: 3D Printer + Dryer
+desc: Connect to BambuLab printer status service and dryer. Monitor printing status, receive push notifications, control dryer.
+short_desc: 3D Printer Monitor + Dryer Control
+version: 2.0.0
+author: your_name
+repo: https://github.com/your_name/astrbot_plugin_printer
