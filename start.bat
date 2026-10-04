@@ -1,12 +1,13 @@
 @echo off
 cd /d "%~dp0"
-title BambuLab Printer Status Service
+title Printer Status Service
 
 echo ============================================
 echo   BambuLab Printer Status Service
 echo ============================================
 echo.
 
+REM ---- First run: interactive setup ----
 if not exist "config.json" (
     echo [First Setup] Please enter the following:
     echo.
@@ -25,6 +26,7 @@ if not exist "config.json" (
     echo.
 )
 
+REM ---- Start service ----
 echo [Starting] Server...
 echo.
 echo   Dashboard: https://localhost:18443

@@ -31,11 +31,12 @@ class AgentConnection:
         self.writer = writer
         self.apikey = apikey
         self.addr = addr
-        self.subscriptions = []
+        self.subscriptions = []  # [{"type":"layer", "value":50}, {"type":"error"}]
         self.last_ping = time.time()
         self._closed = False
 
     async def send(self, data):
+        """发送JSON消息"""
         if self._closed:
             return False
         try:
@@ -48,12 +49,14 @@ class AgentConnection:
             return False
 
     async def send_push(self, event_type, event_data):
+        """主动推送事件（检查是否匹配订阅）"""
         for sub in self.subscriptions:
             if sub["type"] == event_type:
+                # 对 layer 和 temp_below 类型检查值匹配
                 if "value" in sub:
                     val = event_data.get("layer", event_data.get("value", 0))
                     if val < sub["value"]:
-                        continue
+                        continue  # 未达到阈值，不推送
                 await self.send({
                     "ok": True,
                     "type": "push",
@@ -63,6 +66,7 @@ class AgentConnection:
                 return
 
     def matches_event(self, event_type):
+        """检查是否订阅了某事件"""
         return any(s["type"] == event_type for s in self.subscriptions)
 
     def close(self):
@@ -81,19 +85,27 @@ class AgentServer:
     """Agent TCP 服务器"""
 
     def __init__(self, config, get_status_fn, control_request_fn=None, control_confirm_fn=None):
+        """
+        Args:
+            config: 配置dict (含 api_keys, agent_port)
+            get_status_fn: 返回格式化状态JSON的同步函数
+            control_request_fn: core.control_request (step 1 发起)
+            control_confirm_fn: core.control_confirm (step 2 确认执行)
+        """
         self.config = config
         self.get_status_fn = get_status_fn
         self.control_request_fn = control_request_fn
         self.control_confirm_fn = control_confirm_fn
         self.port = config.get("agent_port", 19555)
         self.api_keys = config.get("api_keys", [])
-        self.connections = []
+        self.connections = []  # list[AgentConnection]
         self._server = None
 
     def verify_apikey(self, apikey):
         return apikey in self.api_keys
 
     async def _handle_client(self, reader, writer):
+        """处理单个agent连接"""
         addr = writer.get_extra_info("peername")
         conn = AgentConnection(reader, writer, "", addr)
         logger.info("Agent新连接: %s", addr)
@@ -105,6 +117,7 @@ class AgentServer:
                 try:
                     chunk = await asyncio.wait_for(reader.read(4096), timeout=60)
                 except asyncio.TimeoutError:
+                    # 超时无数据，检查心跳
                     if time.time() - conn.last_ping > 90:
                         logger.info("Agent连接超时断开: %s", addr)
                         break
@@ -132,6 +145,7 @@ class AgentServer:
             logger.info("Agent连接已清理: %s", addr)
 
     async def _handle_message(self, conn, line):
+        """处理单条消息"""
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
@@ -141,6 +155,7 @@ class AgentServer:
         cmd = msg.get("cmd", "")
         apikey = msg.get("apikey", "")
 
+        # 所有命令都需要API key
         if not self.verify_apikey(apikey):
             await conn.send({"ok": False, "error": "无效的API key"})
             return
@@ -157,8 +172,10 @@ class AgentServer:
                 await conn.send({"ok": False, "error": "events必须是数组"})
                 return
 
+            # 添加新订阅
             for evt in events:
                 if isinstance(evt, dict) and "type" in evt:
+                    # 去重
                     conn.subscriptions = [
                         s for s in conn.subscriptions
                         if not (s["type"] == evt["type"]
@@ -167,6 +184,7 @@ class AgentServer:
                     ]
                     conn.subscriptions.append(evt)
 
+            # 确保连接在列表中
             if conn not in self.connections:
                 self.connections.append(conn)
 
@@ -196,12 +214,14 @@ class AgentServer:
             if not action:
                 await conn.send({"ok": False, "error": "缺少 action"})
             elif confirm_id:
+                # Step 2: 确认执行
                 if self.control_confirm_fn:
                     result = self.control_confirm_fn(confirm_id)
                     await conn.send({"ok": True, "type": "response", "data": result})
                 else:
                     await conn.send({"ok": False, "error": "控制功能未初始化"})
             else:
+                # Step 1: 发起请求
                 if self.control_request_fn:
                     result = self.control_request_fn(action)
                     await conn.send({"ok": True, "type": "response", "data": result})
@@ -216,20 +236,23 @@ class AgentServer:
             await conn.send({"ok": False, "error": f"未知命令: {cmd}"})
 
     async def push_events(self, events):
+        """向所有连接的agent推送事件"""
         if not events:
             logger.debug("push_events: 事件列表为空，跳过")
             return
-
+            
+        # 清理断开的连接
         before = len(self.connections)
         self.connections = [c for c in self.connections if not c.is_closed]
         after = len(self.connections)
-
+        
+        # Webhook 推送（不依赖 agent 连接）
         await self._push_webhooks(events)
-
+        
         if after == 0:
             logger.info("push_events: 无agent连接，已通过webhook推送 %d 个事件", len(events))
             return
-
+            
         logger.info("push_events: %d个agent在线, %d个事件待处理", after, len(events))
 
         for event in events:
@@ -251,9 +274,11 @@ class AgentServer:
             else:
                 logger.info("事件 %s: 无agent订阅此类型", evt_type)
 
+        # 再次清理断开的连接
         self.connections = [c for c in self.connections if not c.is_closed]
 
     async def _push_webhooks(self, events):
+        """向所有注册的 webhook 推送事件"""
         try:
             import requests as req
             wh_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'webhooks.json')
@@ -278,6 +303,7 @@ class AgentServer:
             logger.debug('Webhook推送异常: %s', e)
 
     async def start(self):
+        """启动TCP服务器"""
         self._server = await asyncio.start_server(
             self._handle_client,
             host="0.0.0.0",
@@ -286,6 +312,7 @@ class AgentServer:
         logger.info("Agent TCP服务已启动: :%d", self.port)
 
     async def stop(self):
+        """停止TCP服务器"""
         if self._server:
             self._server.close()
             await self._server.wait_closed()

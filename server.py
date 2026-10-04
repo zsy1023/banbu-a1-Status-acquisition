@@ -16,6 +16,7 @@ import os
 import sys
 import warnings
 
+# 关闭SSL警告
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 try:
     import urllib3
@@ -23,10 +24,12 @@ try:
 except Exception:
     pass
 
+# 确保当前目录在path中，以便导入同目录模块
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+# 日志配置
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -45,6 +48,7 @@ def banner():
 
 
 def load_or_exit():
+    """加载配置，失败则退出"""
     if not os.path.exists(CONFIG_FILE):
         logger.error("config.json 不存在！请先运行 start.bat 完成配置")
         sys.exit(1)
@@ -61,6 +65,7 @@ def load_or_exit():
 
 
 async def periodic_refresh(core):
+    """后台定时刷新状态"""
     while True:
         try:
             if not core.login_required:
@@ -76,13 +81,16 @@ async def main():
 
     config = load_or_exit()
 
+    # 生成证书
     from cert_util import generate_certificate
     generate_certificate()
 
+    # 创建核心引擎
     from core import PrinterCore
     core = PrinterCore(config, TOKEN_FILE)
     core._loop = asyncio.get_event_loop()
 
+    # 创建Agent TCP服务器（先创建设置回调，再登录刷新）
     from agent_tcp import AgentServer
     agent_server = AgentServer(
         config, core.get_formatted_status,
@@ -90,18 +98,33 @@ async def main():
         control_confirm_fn=core.control_confirm,
     )
 
+    # 设置事件回调
     async def on_event(events):
         await agent_server.push_events(events)
     core.on_event_callback = on_event
 
+    # 自动登录（回调已设置好，事件不会被漏掉）
     if core.try_auto_login():
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, core.do_refresh)
 
+    # 创建Web应用
     from web import create_app, start_web
     web_app = create_app(core, agent_server)
     web_port = config.get("web_port", 18443)
 
+    # Web 先就绪：保证提醒弹窗被点击时，登录页已经能访问
+    web_runner = await start_web(web_app, web_port)
+
+    # token 失效 → 弹窗提醒 + 点击进入网页端更新 token
+    if core.login_required:
+        from notification import prompt_token_update
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None, prompt_token_update, core.dashboard_url, core.login_state
+        )
+
+    # 打印访问地址
     logger.info("─" * 50)
     logger.info("  服务已启动！")
     proto = "https"
@@ -111,9 +134,9 @@ async def main():
     logger.info("  ⏰ 刷新间隔: %d秒", core.refresh_interval)
     logger.info("─" * 50)
 
+    # 启动组件
     await asyncio.gather(
         agent_server.start(),
-        start_web(web_app, web_port),
         periodic_refresh(core),
     )
 
