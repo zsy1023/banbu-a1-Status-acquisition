@@ -1,6 +1,6 @@
 # BambuLab Printer Status Service
 
-[![GitHub stars](https://img.shields.io/github/stars/zsy1023/banbu-a1-Status-acquisition)](https://github.com/zsy1023/banbu-a1-Status-acquisition/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/zsy1023/banbu-a1-Status-acquisition?style=flat)](https://github.com/zsy1023/banbu-a1-Status-acquisition/stargazers)
 [![GitHub license](https://img.shields.io/github/license/zsy1023/banbu-a1-Status-acquisition)](https://github.com/zsy1023/banbu-a1-Status-acquisition/blob/main/LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/)
 
