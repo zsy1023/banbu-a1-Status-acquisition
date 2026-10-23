@@ -15,7 +15,6 @@ A lightweight service for monitoring BambuLab 3D printers, with real-time status
 | English | 中文 |
 |---------|------|
 | **Web Dashboard** - Real-time printer status monitoring via HTTPS | **Web仪表盘** - 通过HTTPS实时监控打印机状态 |
-| **TCP API** - For external applications to connect and receive push events | **TCP API** - 供外部程序连接并接收事件推送 |
 | **MQTT Integration** - Direct connection to BambuCloud for printer status | **MQTT集成** - 直接连接拓竹云获取打印机状态 |
 | **Windows Notifications** - Push notifications on print completion, errors, etc. | **Windows通知** - 打印完成、错误等事件推送系统通知 |
 | **Remote Control** - Control printer lights via API with two-step confirmation | **远程控制** - 通过API控制打印机灯光（两步确认） |
@@ -54,9 +53,7 @@ Run `start.bat` for first-time setup, or manually create `config.json`:
 {
   "phone": "your-phone-number",
   "serial": "printer-serial-number",
-  "api_keys": ["your-secure-api-key"],
   "web_port": 18443,
-  "agent_port": 19555,
   "refresh_interval": 30,
   "mqtt_timeout": 10,
   "mqtt_retries": 1
@@ -67,10 +64,18 @@ Run `start.bat` for first-time setup, or manually create `config.json`:
 |-------------|-------------------|
 | `phone` | Your BambuCloud registered phone number / 拓竹云注册手机号 |
 | `serial` | Printer serial number / 打印机序列号 |
-| `api_keys` | API keys for TCP authentication / TCP认证的API密钥 |
-| `web_port` | HTTPS web dashboard port / HTTPS仪表盘端口 |
-| `agent_port` | TCP API port / TCP API端口 |
+| `web_port` | Preferred HTTPS web dashboard port / 首选的HTTPS仪表盘端口 |
 | `refresh_interval` | Status refresh interval (seconds) / 状态刷新间隔（秒） |
+
+> **Port fallback / 端口自动顺延**
+> If `web_port` is taken or reserved by Windows (WinNAT / Hyper-V / WSL2 / Docker can
+> exclude port blocks, causing bind error 10013), the service automatically tries the
+> next free port instead of crashing. The real port is printed at startup and written
+> to `data/runtime.json`; `status.bat` reads it automatically.
+>
+> 若 `web_port` 被占用、或被 Windows 保留端口区间（WinNAT / Hyper-V / WSL2 / Docker，
+> 绑定报 10013）占掉，服务会自动顺延到下一个可用端口而不是崩溃。真实端口会在启动日志
+> 里打印，同时写入 `data/runtime.json`，`status.bat` 会自动读取。
 
 ### 3. Start the Service / 启动服务
 
@@ -89,8 +94,12 @@ Or double-click `start.bat`.
 | English | 中文 | URL |
 |---------|------|-----|
 | Dashboard / 仪表盘 | Web控制面板 | https://localhost:18443 |
-| TCP API | TCP接口 | tcp://localhost:19555 |
 | Status API | 状态API | https://localhost:18443/api/status |
+
+> The port above is the default. If the service fell back to another port, check the
+> startup log or `data/runtime.json` for the actual one.
+
+> 上表是默认端口。若服务已自动顺延到其他端口，请以启动日志或 `data/runtime.json` 为准。
 
 ---
 
@@ -107,18 +116,6 @@ Or double-click `start.bat`.
 2. 点击"发送验证码"获取短信验证码
 3. 输入验证码登录
 4. 仪表盘将显示实时打印机状态
-
-### TCP API Protocol / TCP API协议
-
-Send JSON commands over TCP:
-
-通过TCP发送JSON命令：
-
-```json
-{"cmd": "get_status", "apikey": "your-api-key"}
-{"cmd": "subscribe", "apikey": "your-api-key", "events": ["complete", "error", "layer"]}
-{"cmd": "ping", "apikey": "your-api-key"}
-```
 
 ### REST API
 
@@ -148,24 +145,23 @@ BambuPrinter-OpenSource/
 ├── notification.py      # Windows notification module / Windows通知模块
 ├── server.py            # Main entry point / 主入口
 ├── web.py               # Web server (dashboard + REST API) / Web服务器（仪表盘+REST API）
-├── agent_tcp.py         # TCP server for external agents / 外部程序TCP服务器
-├── config.json          # Configuration file / 配置文件
-├── token.txt            # Auto-generated login token / 自动生成的登录Token
-├── data/                # Data storage / 数据存储
+├── webhook.py           # Webhook event delivery / Webhook事件推送
+├── status.py            # CLI status viewer / 命令行状态查看
+├── config.json          # Configuration (git-ignored) / 配置文件（不入库）
+├── token.txt            # Auto-generated login token (git-ignored) / 登录Token（不入库）
+├── data/                # Data storage (git-ignored) / 数据存储（不入库）
 │   ├── print_history.json
 │   ├── temp_history.json
 │   ├── notify_rules.json
-│   └── webhooks.json
+│   ├── webhooks.json
+│   └── runtime.json     # Actual port published at startup / 启动时发布的实际端口
 ├── templates/           # HTML templates / HTML模板
 │   └── dashboard.html
-├── cert/                # SSL certificates / SSL证书
+├── cert/                # SSL certificates (git-ignored) / SSL证书（不入库）
 │   ├── server.crt
 │   └── server.key
-├── astrbot_plugin_printer/  # AstrBot plugin / AstrBot插件
-│   ├── main.py
-│   ├── metadata.yaml
-│   └── requirements.txt
 ├── start.bat            # Quick start script / 快速启动脚本
+├── status.bat           # CLI status viewer launcher / 命令行状态查看入口
 ├── install_startup.py   # Auto-start configuration / 开机自启配置
 └── requirements.txt     # Python dependencies / Python依赖
 ```
@@ -177,7 +173,7 @@ BambuPrinter-OpenSource/
 | English | 中文 |
 |---------|------|
 | HTTPS is enabled with auto-generated self-signed certificates | HTTPS已启用，使用自动生成的自签名证书 |
-| API keys are required for TCP connections | TCP连接需要API密钥认证 |
+| The dashboard has **no authentication** and binds `0.0.0.0` — keep it on a trusted LAN or firewall it | 仪表盘**没有鉴权**且监听 `0.0.0.0`，请只在可信内网使用或加防火墙 |
 | Token is stored locally | Token存储在本地 |
 | Phone number is only used for BambuCloud authentication | 手机号仅用于拓竹云认证 |
 
@@ -200,7 +196,7 @@ Custom rules can be configured via the dashboard settings:
 
 ## 📄 License / 许可证
 
-MIT License - see [LICENSE](LICENSE) file for details.
+GNU General Public License v3.0 - see [LICENSE](LICENSE) file for details.
 
 ---
 

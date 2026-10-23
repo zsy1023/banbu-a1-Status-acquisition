@@ -1,18 +1,21 @@
 """
 Web服务器 — HTTPS + 仪表盘 + REST API
 
-端口: 18443 (可配置)
+端口: 配置里的 web_port（默认 18443），被占用或被系统保留时自动顺延并发布实际端口
 证书: 自签名 cert/server.crt + server.key
 """
 import os
 import json
 import logging
+import socket
+from datetime import datetime
 
 from aiohttp import web
 from aiohttp.abc import AbstractAccessLogger
 
 from cert_util import CERT_FILE, KEY_FILE
 from core import NotifyRuleManager
+from webhook import load_webhooks, save_webhooks, push_events as push_webhook_events
 import uuid
 
 logger = logging.getLogger("printer.web")
@@ -80,43 +83,30 @@ def load_dashboard_html():
     return "<h1>仪表盘模板缺失</h1>"
 
 
-# ── Webhook 存储 ───────────────────────────
-_webhook_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'webhooks.json')
-
-def _load_webhooks():
-    try:
-        if os.path.exists(_webhook_file):
-            with open(_webhook_file, 'r') as f:
-                data = f.read()
-                return json.loads(data) if data else []
-    except: pass
-    return []
-
-def _save_webhooks(hooks):
-    os.makedirs(os.path.dirname(_webhook_file), exist_ok=True)
-    with open(_webhook_file, 'w') as f:
-        f.write(json.dumps(hooks, ensure_ascii=False, indent=2))
+# ── Webhook 存储已移至 webhook.py ────────────────
 
 
-def create_app(core, agent_server):
-    async def handle_test_event(request):
-        """POST /api/test-event — 推送测试事件到 Agent"""
-        try:
-            body = await request.json()
-        except:
-            body = {}
-        evt_type = body.get("event", "paused")
-        evt_data = body.get("data", {"percent": 55, "layer": 110})
-        if agent_server:
-            await agent_server.push_events([{"type": evt_type, "data": evt_data}])
-            return web.json_response({"ok": True, "pushed": evt_type})
-        return web.json_response({"ok": False, "error": "Agent未运行"}, status=500)
+def create_app(core):
     """创建aiohttp web应用并注册路由
 
     Args:
         core: PrinterCore 实例
-        agent_server: AgentServer 实例
     """
+    async def handle_test_event(request):
+        """POST /api/test-event — 推送测试事件到已注册的 webhook"""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        evt_type = body.get("event", "paused")
+        evt_data = body.get("data", {"percent": 55, "layer": 110})
+        if not load_webhooks():
+            return web.json_response(
+                {"ok": False, "error": "没有已注册的 webhook，无需推送"}, status=400
+            )
+        await push_webhook_events([{"type": evt_type, "data": evt_data}])
+        return web.json_response({"ok": True, "pushed": evt_type})
+
     app = web.Application()
 
     # ── 路由 ──────────────────────────────────────────
@@ -195,9 +185,7 @@ def create_app(core, agent_server):
         safe = {
             "phone": c["phone"][:3] + "****" + c["phone"][-4:],
             "serial": c["serial"],
-            "api_key_count": len(c.get("api_keys", [])),
-            "web_port": c.get("web_port", 18443),
-            "agent_port": c.get("agent_port", 19555),
+            "web_port": request.app.get("web_port", c.get("web_port", 18443)),
             "refresh_interval": c.get("refresh_interval", 30),
             "login_status": "已登录" if not core.login_required else "未登录",
         }
@@ -257,16 +245,16 @@ def create_app(core, agent_server):
                 return web.json_response({'ok': False, 'error': '缺少url'}, status=400)
             events = body.get('events', [])
             hook_id = str(uuid.uuid4())[:8]
-            hooks = _load_webhooks()
+            hooks = load_webhooks()
             hooks.append({'id': hook_id, 'url': url, 'events': events})
-            _save_webhooks(hooks)
+            save_webhooks(hooks)
             logger.info('Webhook注册: %s -> %s (%d events)', hook_id, url, len(events))
             return web.json_response({'ok': True, 'id': hook_id})
         elif action == 'unregister':
             hook_id = body.get('id', '')
-            hooks = _load_webhooks()
+            hooks = load_webhooks()
             hooks = [h for h in hooks if h['id'] != hook_id]
-            _save_webhooks(hooks)
+            save_webhooks(hooks)
             return web.json_response({'ok': True})
         return web.json_response({'ok': False, 'error': '未知action'}, status=400)
 
@@ -349,8 +337,85 @@ def create_app(core, agent_server):
     return app
 
 
+# 配置端口不可用时的备用端口候选顺序
+FALLBACK_PORTS = (19443, 9443, 8443, 29443, 30443)
+PORT_SCAN_SPAN = 50
+
+
+def candidate_ports(preferred, fallbacks=FALLBACK_PORTS, scan=PORT_SCAN_SPAN):
+    """按优先级产出候选端口
+
+    先试配置端口，再试几个固定备用端口，最后在配置端口之后做有限顺序扫描。
+    末尾的顺序扫描能把整段被系统保留的端口区（如 18354-18453）直接跳过去。
+    """
+    seen = set()
+    for p in (preferred, *fallbacks):
+        if p not in seen:
+            seen.add(p)
+            yield p
+    for p in range(preferred + 1, preferred + 1 + scan):
+        if p not in seen:
+            seen.add(p)
+            yield p
+
+
+def describe_bind_error(err):
+    """把绑定失败的 OSError 翻译成可操作的说明"""
+    if err is None:
+        return "未知错误"
+    winerror = getattr(err, "winerror", None)
+    if winerror == 10013:
+        return ("权限被拒 (WinError 10013)，通常是该端口被 Windows/WinNAT 的保留端口区间独占，"
+                "常见于开了 Hyper-V / WSL2 / Docker 的机器")
+    if winerror == 10048 or err.errno == 98:
+        return "端口已被其他程序占用"
+    return f"WinError {winerror}" if winerror else str(err)
+
+
+def _port_available(port):
+    """探测端口能否独占绑定
+
+    不设置 SO_REUSEADDR —— Windows 上它会允许绑定到已被监听的端口，导致探测结果失真。
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("0.0.0.0", port))
+        return True, None
+    except OSError as exc:
+        return False, exc
+    finally:
+        sock.close()
+
+
+RUNTIME_FILE = os.path.join(HERE, "data", "runtime.json")
+
+
+def publish_runtime_port(port):
+    """把实际监听端口写到 data/runtime.json，供 status.py 等外部工具读取
+
+    配置端口可能被系统保留区占掉而自动回退，外部工具靠这个文件才能拿到真实端口。
+    """
+    payload = {
+        "web_port": port,
+        "pid": os.getpid(),
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        os.makedirs(os.path.dirname(RUNTIME_FILE), exist_ok=True)
+        with open(RUNTIME_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except OSError as e:
+        logger.warning("写入运行时端口文件失败 %s: %s", RUNTIME_FILE, e)
+        return
+    logger.info("实际端口已发布: %s (web_port=%d)", RUNTIME_FILE, port)
+
+
 async def start_web(app, port):
-    """启动HTTPS Web服务器"""
+    """启动HTTPS Web服务器
+
+    返回 (runner, 实际监听端口)。配置端口无法绑定时自动改用候选端口，
+    避免整个服务因为一个端口被系统保留而启动失败。
+    """
     ssl_context = None
     if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
         import ssl as ssl_mod
@@ -360,11 +425,39 @@ async def start_web(app, port):
     else:
         logger.warning("未找到证书文件，以HTTP模式运行")
 
+    first_error = None
+    actual_port = None
+    for candidate in candidate_ports(port):
+        ok, err = _port_available(candidate)
+        if ok:
+            actual_port = candidate
+            break
+        if first_error is None:
+            first_error = err
+        logger.warning("端口 %d 不可用（%s），尝试下一个端口", candidate, describe_bind_error(err))
+
+    if actual_port is None:
+        raise RuntimeError(
+            f"配置端口 {port} 及其候选端口均无法绑定。原始错误: {describe_bind_error(first_error)}。"
+            "可用 'netsh int ipv4 show excludedportrange protocol=tcp' 查看系统保留端口区间，"
+            "或修改 config.json 里的 web_port。"
+        )
+
     runner = web.AppRunner(app, access_log_class=ChineseAccessLogger)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port, ssl_context=ssl_context)
-    await site.start()
+    try:
+        site = web.TCPSite(runner, "0.0.0.0", actual_port, ssl_context=ssl_context)
+        await site.start()
+    except OSError:
+        await runner.cleanup()
+        raise
+
+    if actual_port != port:
+        logger.warning("配置端口 %d 不可用，已自动改用 %d（仪表盘地址随之变化）", port, actual_port)
+
+    app["web_port"] = actual_port
+    publish_runtime_port(actual_port)
 
     proto = "https" if ssl_context else "http"
-    logger.info("Web服务已启动: %s://0.0.0.0:%d", proto, port)
-    return runner
+    logger.info("Web服务已启动: %s://0.0.0.0:%d", proto, actual_port)
+    return runner, actual_port

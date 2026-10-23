@@ -4,10 +4,9 @@
 启动所有组件:
   1. 加载配置
   2. 生成证书（如需）
-  3. 自动登录（用缓存的token）
-  4. 启动 Agent TCP 服务
-  5. 启动 HTTPS Web 服务（仪表盘 + REST API）
-  6. 启动后台状态刷新循环
+  3. 启动 HTTPS Web 服务（仪表盘 + REST API），确定实际监听端口
+  4. 自动登录（用缓存的token）+ 首次刷新
+  5. 启动后台状态刷新循环
 """
 import asyncio
 import json
@@ -56,7 +55,7 @@ def load_or_exit():
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    for key in ["phone", "serial", "api_keys"]:
+    for key in ["phone", "serial"]:
         if key not in config:
             logger.error("config.json 缺少必要字段: %s", key)
             sys.exit(1)
@@ -90,31 +89,28 @@ async def main():
     core = PrinterCore(config, TOKEN_FILE)
     core._loop = asyncio.get_event_loop()
 
-    # 创建Agent TCP服务器（先创建设置回调，再登录刷新）
-    from agent_tcp import AgentServer
-    agent_server = AgentServer(
-        config, core.get_formatted_status,
-        control_request_fn=core.control_request,
-        control_confirm_fn=core.control_confirm,
-    )
+    # 事件回调：推送到已注册的 webhook
+    from webhook import push_events as push_webhook_events
 
-    # 设置事件回调
     async def on_event(events):
-        await agent_server.push_events(events)
+        await push_webhook_events(events)
     core.on_event_callback = on_event
 
-    # 自动登录（回调已设置好，事件不会被漏掉）
+    # 创建并启动 Web。先绑定再登录刷新 —— 端口确定之后 dashboard_url 才是对的，
+    # 否则首次刷新期间弹出的通知会带上旧端口的链接。
+    from web import create_app, start_web
+    web_app = create_app(core)
+    config_port = config.get("web_port", 18443)
+    web_runner, web_port = await start_web(web_app, config_port)
+    if web_port != config_port:
+        # 端口发生了回退，同步修正通知里点击跳转用的仪表盘地址
+        core.dashboard_url = f"https://localhost:{web_port}"
+        core.login_url = core.dashboard_url + "/?login=1"
+
+    # 自动登录 + 首次刷新（回调已就绪，链接端口已确定）
     if core.try_auto_login():
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, core.do_refresh)
-
-    # 创建Web应用
-    from web import create_app, start_web
-    web_app = create_app(core, agent_server)
-    web_port = config.get("web_port", 18443)
-
-    # Web 先就绪：保证提醒弹窗被点击时，登录页已经能访问
-    web_runner = await start_web(web_app, web_port)
 
     # token 失效 → 弹窗提醒 + 点击进入网页端更新 token
     if core.login_required:
@@ -127,18 +123,13 @@ async def main():
     # 打印访问地址
     logger.info("─" * 50)
     logger.info("  服务已启动！")
-    proto = "https"
-    logger.info("  🌐 仪表盘:  %s://localhost:%d", proto, web_port)
-    logger.info("  🔧 Agent:   tcp://localhost:%d", config.get("agent_port", 19555))
-    logger.info("  📡 状态API: %s://localhost:%d/api/status", proto, web_port)
+    logger.info("  🌐 仪表盘:  https://localhost:%d", web_port)
+    logger.info("  📡 状态API: https://localhost:%d/api/status", web_port)
     logger.info("  ⏰ 刷新间隔: %d秒", core.refresh_interval)
     logger.info("─" * 50)
 
-    # 启动组件
-    await asyncio.gather(
-        agent_server.start(),
-        periodic_refresh(core),
-    )
+    # 后台状态刷新循环
+    await periodic_refresh(core)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,8 @@
   ⚪ 灰色   — 次要信息
   ⚪ 亮白粗体 — 分隔线/标题
 """
+import json
+import os
 import sys
 
 try:
@@ -20,7 +22,47 @@ except ImportError:
     print("\033[91m❌ 缺少 requests 库，请运行: pip install requests\033[0m")
     sys.exit(1)
 
-API = "https://localhost:18443/api/status"
+DEFAULT_PORT = 18443
+HERE = os.path.dirname(os.path.abspath(__file__))
+RUNTIME_FILE = os.path.join(HERE, "data", "runtime.json")
+CONFIG_FILE = os.path.join(HERE, "config.json")
+
+
+def candidate_ports():
+    """候选端口：运行时发布的实际端口 → config.json 的 web_port → 默认 18443
+
+    服务端在配置端口被占用或被系统保留时会自动顺延，并把真实端口写进
+    data/runtime.json；这里按顺序试，谁先连通用谁。
+    """
+    ports = []
+    for path in (RUNTIME_FILE, CONFIG_FILE):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                p = json.load(f).get("web_port")
+        except (OSError, ValueError):
+            continue
+        if isinstance(p, int):
+            ports.append(p)
+    ports.append(DEFAULT_PORT)
+
+    seen = set()
+    for p in ports:
+        if p not in seen:
+            seen.add(p)
+            yield p
+
+
+def fetch_status():
+    """按候选端口依次尝试，返回 (状态数据, 实际使用的端口)"""
+    last_err = None
+    for port in candidate_ports():
+        try:
+            resp = requests.get(f"https://localhost:{port}/api/status",
+                                verify=False, timeout=5)
+            return resp.json(), port
+        except requests.exceptions.ConnectionError as e:
+            last_err = e
+    raise last_err or RuntimeError("没有可用的候选端口")
 
 # ── 语义化颜色 ──────────────────────────────────
 # 命名规则: 用途_颜色，便于理解
@@ -192,8 +234,7 @@ def print_status(s):
 
 def main():
     try:
-        resp = requests.get(API, verify=False, timeout=10)
-        data = resp.json()
+        data, port = fetch_status()
     except requests.exceptions.ConnectionError:
         print(f"{CLR['hot']}❌ 无法连接服务{CLR['R']}")
         print(f"   {muted('请先启动 printer_service: 双击 start.bat')}")
@@ -204,7 +245,7 @@ def main():
 
     if data.get("ok") is False and data.get("error") == "需要先登录":
         print(f"{CLR['warn']}⚠️ 未登录{CLR['R']}")
-        print(f"   {muted('浏览器打开 https://localhost:18443 登录')}")
+        print(f"   {muted(f'浏览器打开 https://localhost:{port} 登录')}")
         sys.exit(1)
 
     print_status(data)

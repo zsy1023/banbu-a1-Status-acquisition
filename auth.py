@@ -1,4 +1,4 @@
-"""认证模块 — API key校验 + 拓竹token管理"""
+"""认证模块 — 拓竹token管理"""
 import os
 import json
 import logging
@@ -66,11 +66,6 @@ def load_config(config_path):
     """加载配置文件"""
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def verify_apikey(config, apikey):
-    """校验API key是否有效"""
-    return apikey in config.get("api_keys", [])
 
 
 def test_token(token):

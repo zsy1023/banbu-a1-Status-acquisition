@@ -4,7 +4,7 @@
 负责：
   1. 定时从MQTT拉取打印机状态
   2. 检测事件（层到达/错误/完成/温度阈值）
-  3. 通过回调推送事件给agent_tcp
+  3. 通过回调推送事件给 webhook
 """
 import time
 import logging
@@ -55,7 +55,7 @@ def hex_to_rgb(hex_color):
 
 # 事件订阅列表中，每个订阅项的格式：
 # {"events": [{"type":"layer", "value":50}, {"type":"error"}, ...]}
-# 实际由agent_tcp管理，core只负责检测和回调
+# 实际由 webhook.py 推送，core只负责检测和回调
 
 
 class EventEngine:
@@ -727,7 +727,7 @@ class PrinterCore:
             config: config.json 内容
             token_file: token.txt 路径
             on_event_callback: async function(event, event_filters)
-                当事件触发时调用，用于向agent推送
+                当事件触发时调用，用于向 webhook 推送
         """
         self.config = config
         self.token_file = token_file
@@ -914,11 +914,11 @@ class PrinterCore:
             })
             logger.info("通知规则触发: %s | 事件已加入推送队列", rule["type"])
 
-        # 触发事件回调（推送到 Agent TCP）
+        # 触发事件回调（推送到 webhook）
         if events:
             logger.info("本轮共 %d 个事件待推送: %s", len(events), [e["type"] for e in events])
         if events and self.on_event_callback:
-            logger.info("回调函数存在，准备推送到 Agent TCP...")
+            logger.info("回调函数存在，准备推送到 webhook...")
             import asyncio
             if self._loop and not self._loop.is_closed():
                 logger.info("事件循环可用，提交推送任务...")
@@ -1030,7 +1030,7 @@ class PrinterCore:
         - 已离开 PAUSE：清理等待态
 
         Returns:
-            list[dict]: 需要推送给 Agent 的事件（最多一个 auto_retry 事件）
+            list[dict]: 需要推送给 webhook 的事件（最多一个 auto_retry 事件）
         """
         rm = self.retry_manager
         state = data.get("gcode_state", "")
